@@ -7,11 +7,11 @@ Welcome to the internal documentation for our core data engineering pipelines. T
 ### Orchestration Engine: Apache Airflow
 Our entire data ecosystem is orchestrated using Apache Airflow. We leverage Airflow to schedule, execute, and monitor the health of our ETL tasks.
 
-- **DAG Name:** `daily_sales_etl`
-- **Schedule:** `@daily` (runs every night at midnight to process the previous day's data)
+- **DAG Name:** `monthly_executive_etl`
+- **Schedule:** `@monthly`
 - **Database Connection:** All tasks use the `postgres_prod` Airflow connection ID to communicate with our production data warehouse.
 - **Ownership:** Maintained by the `data_engineering_team`
-- **Tags:** `star_schema`, `sales`, `daily`
+- **Tags:** `aggregate`, `sales`, `monthly`
 
 ### Why Postgres?
 **"Why did we use Postgres for the metadata DB?"**
@@ -19,38 +19,35 @@ We chose Postgres as our primary database for the metadata and analytical backen
 
 ---
 
-## 🔀 Data Flow & Star Schema Architecture
+## 🔀 Data Flow & Schema Architecture
 
-To optimize querying performance for our downstream BI tools, we utilize a classic **Kimball Star Schema**. The pipeline extracts from raw normalized tables and loads them into a highly optimized, denormalized hub-and-spoke model.
+Because our raw transactional data natively conforms to a Kimball Star Schema upon ingestion, our downstream Airflow pipeline is dedicated exclusively to producing high-level executive aggregations.
 
-### 1. Dimension Tables
-- **`dim_users`:** Extracts user entity data (names, emails) directly from the raw `users` table.
-- **`dim_products`:** Extracts product entity data (categories, pricing) directly from the raw `products` table.
+### 1. Native Star Schema (Foundation Layer)
+We rely on our core raw tables as our fully-realized Data Warehouse foundation:
+- **Dimensions:** `users_data` and `products`.
+- **Fact:** `fact_sales` (The raw transactional ledger storing every granular line item and its revenue).
 
-### 2. Central Fact Table (`fact_sales`)
-- **Sources:** The fact table denormalizes data by joining `order_items`, `orders`, and `products`.
-- **Transformation:** It aggregates the lowest grain of sales data, pulling the `order_date` from `orders`, and calculating `total_revenue` by multiplying `quantity` from `order_items` by the `price` from `products`.
-- **Destination:** Loads the combined transactional data directly into `fact_sales`.
+### 2. Executive Aggregate Table (`monthly_revenue`)
+- **Sources:** Extracts directly from the foundational `fact_sales` table.
+- **Transformation:** It rolls up the granular line items by executing a massive `GROUP BY` operation on the `order_date` (truncated to the month level). It calculates `SUM(total_revenue)` and `SUM(quantity)`.
+- **Destination:** Loads the summary metrics into the `monthly_revenue` aggregate table.
 
 ---
 
 ## ⚙️ Task Dependencies (DAG Structure)
 
-The Airflow DAG executes four distinct tasks designed to safely load the Star Schema.
+Our Airflow DAG is clean and focused solely on the monthly executive roll-up:
 
-1. **`load_dim_users`**: Populates `dim_users`.
-2. **`load_dim_products`**: Populates `dim_products`.
-3. **`load_fact_sales`**: Populates the central `fact_sales` table.
-4. **`notify_success`**: Acts as the final downstream gate.
+1. **`load_monthly_revenue`**: Extracts from `fact_sales` and populates the `monthly_revenue` table.
+2. **`notify_success`**: Acts as the final downstream gate.
 
 **Dependency Tree:**
 ```python
-[load_dim_users, load_dim_products] >> load_fact_sales >> notify_success
+task_aggregate_revenue >> task_notify
 ```
-This guarantees that the dimension tables are fully populated and updated before we attempt to insert the massive fact records, preventing foreign key violations!
 
 ---
 
 ## ✓ Data Quality Expectations
-- **`dim_users` Table:** Contains highly sensitive PII (`email`). We expect a 0% duplicate rate.
-- **`fact_sales` Table:** An immutable ledger. Null values are strictly forbidden in any foreign keys (`user_id`, `product_id`).
+- **`monthly_revenue` Table:** As an executive dashboard feed, data cannot be missing. If a month has $0 revenue, it must explicitly output $0 rather than omitting the row entirely.

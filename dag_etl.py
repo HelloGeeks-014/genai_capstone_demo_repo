@@ -11,71 +11,31 @@ default_args = {
 }
 
 dag = DAG(
-    'daily_sales_etl',
+    'monthly_executive_etl',
     default_args=default_args,
-    description='Extracts daily transactions into a Kimball Star Schema',
-    schedule_interval='@daily',
+    description='Rolls up daily Fact Sales into a Monthly Executive Summary',
+    schedule_interval='@monthly',
     catchup=False,
-    tags=['star_schema', 'sales', 'daily']
+    tags=['aggregate', 'sales', 'monthly']
 )
 
-# Lineage 1: Load Dimension Users
-dim_users_insert = """
-    INSERT INTO dim_users (user_id, first_name, last_name, email)
+# Lineage: Roll up Fact Sales into Monthly Revenue
+aggregate_revenue_insert = """
+    INSERT INTO monthly_revenue (report_month, total_revenue, total_items_sold)
     SELECT 
-        user_id,
-        first_name,
-        last_name,
-        email
-    FROM users
-"""
-
-# Lineage 2: Load Dimension Products
-dim_products_insert = """
-    INSERT INTO dim_products (product_id, name, category, price)
-    SELECT 
-        product_id,
-        name,
-        category,
-        price
-    FROM products
-"""
-
-# Lineage 3: Load Fact Sales (Central Hub)
-fact_sales_insert = """
-    INSERT INTO fact_sales (order_date, user_id, product_id, quantity, unit_price, total_revenue)
-    SELECT 
-        o.order_date,
-        o.user_id,
-        oi.product_id,
-        oi.quantity,
-        p.price AS unit_price,
-        (oi.quantity * p.price) AS total_revenue
-    FROM order_items oi
-    JOIN orders o ON oi.order_id = o.order_id
-    JOIN products p ON oi.product_id = p.product_id
+        TO_CHAR(order_date, 'YYYY-MM') AS report_month,
+        SUM(total_revenue) AS total_revenue,
+        SUM(quantity) AS total_items_sold
+    FROM fact_sales
+    GROUP BY TO_CHAR(order_date, 'YYYY-MM')
 """
 
 def print_status():
-    print("Star Schema updated successfully!")
+    print("Monthly Revenue updated successfully!")
 
-task_dim_users = PostgresOperator(
-    task_id='load_dim_users',
-    sql=dim_users_insert,
-    postgres_conn_id='postgres_prod',
-    dag=dag,
-)
-
-task_dim_products = PostgresOperator(
-    task_id='load_dim_products',
-    sql=dim_products_insert,
-    postgres_conn_id='postgres_prod',
-    dag=dag,
-)
-
-task_fact_sales = PostgresOperator(
-    task_id='load_fact_sales',
-    sql=fact_sales_insert,
+task_aggregate_revenue = PostgresOperator(
+    task_id='load_monthly_revenue',
+    sql=aggregate_revenue_insert,
     postgres_conn_id='postgres_prod',
     dag=dag,
 )
@@ -87,4 +47,4 @@ task_notify = PythonOperator(
 )
 
 # Define task dependencies
-[task_dim_users, task_dim_products] >> task_fact_sales >> task_notify
+task_aggregate_revenue >> task_notify
